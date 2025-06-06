@@ -1,4 +1,3 @@
-
 'use server';
 /**
  * @fileOverview Service for interacting with the GitHub API.
@@ -40,6 +39,30 @@ function parseGitHubUrl(url: string): { owner: string; repo: string } | null {
   }
 }
 
+function isRetryableError(error: any): boolean {
+  if (!error) return false;
+  
+  const errorMessage = error.message?.toLowerCase() || '';
+  const retryableMessages = [
+    'socket hang up',
+    'econnreset',
+    'etimedout',
+    'econnrefused',
+    'network error',
+    'fetch failed'
+  ];
+  
+  return retryableMessages.some(msg => errorMessage.includes(msg));
+}
+
+function isRetryableStatus(status: number): boolean {
+  return status === 429 || (status >= 500 && status < 600);
+}
+
+async function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
 async function fetchFromGitHub(apiUrl: string, token?: string): Promise<any> {
   const headers: HeadersInit = {
     Accept: 'application/vnd.github.v3+json',
@@ -48,18 +71,44 @@ async function fetchFromGitHub(apiUrl: string, token?: string): Promise<any> {
     headers['Authorization'] = `token ${token}`;
   }
 
-  try {
-    const response = await fetch(apiUrl, { headers });
-    if (!response.ok) {
-      const errorData = await response.json().catch(() => ({ message: response.statusText }));
-      throw new Error(
-        `GitHub API request failed: ${response.status} ${errorData.message || response.statusText} for URL ${apiUrl}`
-      );
+  const maxRetries = 3;
+  const baseDelay = 1000; // 1 second
+
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      const response = await fetch(apiUrl, { headers });
+      
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({ message: response.statusText }));
+        const error = new Error(
+          `GitHub API request failed: ${response.status} ${errorData.message || response.statusText} for URL ${apiUrl}`
+        );
+        
+        // If it's a retryable status and we have retries left, continue to retry logic
+        if (isRetryableStatus(response.status) && attempt < maxRetries) {
+          console.warn(`Retryable HTTP error ${response.status} on attempt ${attempt + 1}/${maxRetries + 1} for ${apiUrl}`);
+          const delay = baseDelay * Math.pow(2, attempt);
+          await sleep(delay);
+          continue;
+        }
+        
+        throw error;
+      }
+      
+      return await response.json();
+    } catch (error: any) {
+      console.error(`Error fetching from GitHub API (${apiUrl}) on attempt ${attempt + 1}/${maxRetries + 1}:`, error.message);
+      
+      // If it's the last attempt or not a retryable error, throw
+      if (attempt === maxRetries || !isRetryableError(error)) {
+        throw error;
+      }
+      
+      // Calculate exponential backoff delay
+      const delay = baseDelay * Math.pow(2, attempt);
+      console.warn(`Retrying in ${delay}ms...`);
+      await sleep(delay);
     }
-    return await response.json();
-  } catch (error: any) {
-    console.error(`Error fetching from GitHub API (${apiUrl}):`, error.message);
-    throw error; // Re-throw to be caught by the caller
   }
 }
 
@@ -136,7 +185,6 @@ export async function getRelevantRepoContents(
     if (files.length === 0 && relevantFilePaths.length > 0) {
         return { files: [], fileCount: 0, totalContentLength: 0, errorMessage: `No relevant files could be fetched or decoded from the repository. Inspected ${relevantFilePaths.length} potential paths.` };
     }
-
 
     return { files, fileCount: files.length, totalContentLength };
 
