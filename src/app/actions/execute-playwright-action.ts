@@ -1,4 +1,3 @@
-
 'use server';
 
 import fs from 'fs/promises';
@@ -83,24 +82,39 @@ test.describe('${testCase.scenario.replace(/'/g, "\\'")}', () => {
   `;
   await fs.writeFile(path.join(runContextDir, testFileName), testContent);
 
-
   const finalPlaywrightConfigContent = `
 import type { PlaywrightTestConfig } from '@playwright/test';
+
 const config: PlaywrightTestConfig = {
   timeout: 60 * 1000,
   expect: { timeout: 10 * 1000 },
   reporter: [['json', { outputFile: '${escapePathForJSStringLiteral(reportJsonFileRelativePath)}' }]],
   use: {
-    headless: false, // Set to false to see the browser
-    screenshot: 'on', // Takes screenshot on failure
-    video: 'retain-on-failure', // Records video on failure
-    trace: 'retain-on-failure', // Records trace on failure
+    headless: true, // Set to true for server execution
+    screenshot: 'only-on-failure',
+    video: 'retain-on-failure',
+    trace: 'retain-on-failure',
     baseURL: '${appUrl}',
   },
-  projects: [ { name: 'chromium', use: { browserName: 'chromium' } } ],
+  projects: [ 
+    { 
+      name: 'chromium', 
+      use: { 
+        browserName: 'chromium',
+        viewport: { width: 1280, height: 720 }
+      } 
+    } 
+  ],
   outputDir: '${escapePathForJSStringLiteral(outputArtifactsDirInContext)}',
-  testDir: '.'
+  testDir: '.',
+  webServer: {
+    command: 'echo "Using external server"',
+    url: '${appUrl}',
+    reuseExistingServer: true,
+    timeout: 5000,
+  },
 };
+
 export default config;
 `;
   await fs.writeFile(playwrightConfigPathInContext, finalPlaywrightConfigContent);
@@ -112,30 +126,36 @@ export default config;
   };
 
   try {
-    const projectRoot = process.cwd(); // Ensure projectRoot is defined here as well if used below
     const nodeModulesPath = path.join(projectRoot, 'node_modules');
+    const playwrightBinPath = path.join(nodeModulesPath, '.bin', 'playwright');
+    
+    // Check if playwright binary exists
+    let playwrightCommand = playwrightBinPath;
+    try {
+      await fs.access(playwrightBinPath);
+    } catch {
+      // Fallback to npx if binary doesn't exist
+      playwrightCommand = 'npx';
+    }
+
     const executionEnv = {
-        ...process.env,
-        NODE_PATH: `${process.env.NODE_PATH ? process.env.NODE_PATH + path.delimiter : ''}${nodeModulesPath}`,
+      ...process.env,
+      NODE_PATH: `${process.env.NODE_PATH ? process.env.NODE_PATH + path.delimiter : ''}${nodeModulesPath}`,
+      PLAYWRIGHT_BROWSERS_PATH: path.join(nodeModulesPath, '@playwright', 'test'),
     };
 
-    const playwrightCliJsPath = path.join(projectRoot, 'node_modules', '@playwright', 'test', 'cli.js');
+    const args = playwrightCommand === 'npx' 
+      ? ['playwright', 'test', '--config', playwrightConfigName, '--reporter=json']
+      : ['test', '--config', playwrightConfigName, '--reporter=json'];
     
-    const nodeExecutable = process.execPath; // Use absolute path to current Node.js executable
-    const args = [
-      playwrightCliJsPath, 
-      'test',
-      '--config',
-      playwrightConfigName 
-    ];
-    
-    executionResult.logs?.push(`Executing: ${nodeExecutable} ${args.join(' ')} (CWD: ${runContextDir})`);
+    executionResult.logs?.push(`Executing: ${playwrightCommand} ${args.join(' ')} (CWD: ${runContextDir})`);
     executionResult.logs?.push(`Project root for Node modules: ${projectRoot}`);
     executionResult.logs?.push(`Setting NODE_PATH to: ${executionEnv.NODE_PATH}`);
 
-    const { stdout, stderr } = await execFileAsync(nodeExecutable, args, {
-        cwd: runContextDir,
-        env: executionEnv,
+    const { stdout, stderr } = await execFileAsync(playwrightCommand, args, {
+      cwd: runContextDir,
+      env: executionEnv,
+      timeout: 120000, // 2 minutes timeout
     });
 
     executionResult.stdout = stdout;
@@ -153,18 +173,18 @@ export default config;
 
       const allSpecTitlesInReport: string[] = [];
       function getAllSpecTitles(suites: any[]) {
-          for (const suite of suites) {
-              if (suite.specs) {
-                  suite.specs.forEach((spec: any) => spec.title && allSpecTitlesInReport.push(spec.title));
-              }
-              if (suite.suites) {
-                  getAllSpecTitles(suite.suites);
-              }
+        for (const suite of suites) {
+          if (suite.specs) {
+            suite.specs.forEach((spec: any) => spec.title && allSpecTitlesInReport.push(spec.title));
           }
+          if (suite.suites) {
+            getAllSpecTitles(suite.suites);
+          }
+        }
       }
       if (report.suites) {
-          getAllSpecTitles(report.suites);
-          executionResult.logs?.push(`Available spec titles in report: ${JSON.stringify(allSpecTitlesInReport)}`);
+        getAllSpecTitles(report.suites);
+        executionResult.logs?.push(`Available spec titles in report: ${JSON.stringify(allSpecTitlesInReport)}`);
       }
       
       const specResult = findSpecRecursive(report.suites || [], targetSpecTitle);
@@ -179,7 +199,9 @@ export default config;
           path: att.path ? path.resolve(absoluteOutputArtifactsDir, att.path) : undefined
         }));
 
-        const screenshotAttachment = executionResult.attachments?.find((att: any) => att.name === 'screenshot' && att.contentType === 'image/png' && att.path);
+        const screenshotAttachment = executionResult.attachments?.find((att: any) => 
+          att.name === 'screenshot' && att.contentType === 'image/png' && att.path
+        );
         if (screenshotAttachment?.path) {
           try {
             const screenshotData = await fs.readFile(screenshotAttachment.path);
@@ -192,18 +214,20 @@ export default config;
 
         if (testRun.status !== 'passed') {
           executionResult.error = testRun.error?.message || testRun.errors?.map((e:any) => e.message).join('\\n') || `Test ${testRun.status}`;
-          const videoAttachment = executionResult.attachments?.find((att: any) => att.name === 'video' && att.contentType === 'video/webm' && att.path);
+          const videoAttachment = executionResult.attachments?.find((att: any) => 
+            att.name === 'video' && att.contentType === 'video/webm' && att.path
+          );
           if (videoAttachment?.path) {
-            executionResult.videoPath = videoAttachment.path; // Store the absolute path
+            executionResult.videoPath = videoAttachment.path;
             executionResult.logs?.push(`Video recorded: ${videoAttachment.path}`);
           }
         }
       } else {
-         executionResult.error = `Test result for scenario "${testCase.scenario}" not found in JSON report from ${absoluteReportJsonPath}. Check Playwright stdout/stderr. Ensure target title matches a title in 'Available spec titles in report'.`;
-         executionResult.logs?.push(executionResult.error);
-         if(report.errors && report.errors.length > 0) {
-            executionResult.logs?.push(`Global errors in Playwright JSON report: ${JSON.stringify(report.errors)}`);
-         }
+        executionResult.error = `Test result for scenario "${testCase.scenario}" not found in JSON report from ${absoluteReportJsonPath}. Check Playwright stdout/stderr. Ensure target title matches a title in 'Available spec titles in report'.`;
+        executionResult.logs?.push(executionResult.error);
+        if(report.errors && report.errors.length > 0) {
+          executionResult.logs?.push(`Global errors in Playwright JSON report: ${JSON.stringify(report.errors)}`);
+        }
       }
     } catch (reportError: any) {
       executionResult.error = `Failed to parse Playwright JSON report from ${absoluteReportJsonPath}. Error: ${reportError.message}. Check Playwright stdout/stderr.`;
@@ -221,12 +245,14 @@ export default config;
     if(e.stderr) executionResult.logs?.push(`Error stderr: ${e.stderr}`);
   } finally {
     try {
-      await fs.rm(runContextDir, { recursive: true, force: true }).catch(err => console.warn(`Non-critical: Failed to delete temp run context dir ${runContextDir}: ${err.message}`));
+      await fs.rm(runContextDir, { recursive: true, force: true }).catch(err => 
+        console.warn(`Non-critical: Failed to delete temp run context dir ${runContextDir}: ${err.message}`)
+      );
     } catch (cleanupError: any) {
       console.warn(`Error during cleanup of ${runContextDir}: ${cleanupError.message}`);
       executionResult.logs?.push(`Cleanup error for ${runContextDir}: ${cleanupError.message}`);
     }
   }
+  
   return executionResult as PlaywrightExecutionResult;
 }
-    
