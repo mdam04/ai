@@ -71,7 +71,7 @@ async function fetchFromGitHub(apiUrl: string, token?: string): Promise<any> {
     headers['Authorization'] = `token ${token}`;
   }
 
-  const maxRetries = 3;
+  const maxRetries = 5;
   const baseDelay = 1000; // 1 second
 
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
