@@ -14,11 +14,13 @@ import {
 } from "@/components/ui/form";
 import { Input } from "@/components/ui/input";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { Github, Link as LinkIcon, Loader2 } from "lucide-react";
+import { Github, Link as LinkIcon, Loader2, Key } from "lucide-react";
+import { useState, useEffect } from "react";
 
 const formSchema = z.object({
   githubRepoUrl: z.string().url({ message: "Please enter a valid GitHub repository URL." }),
   applicationUrl: z.string().url({ message: "Please enter a valid application URL." }),
+  githubToken: z.string().optional(),
 });
 
 export type UrlInputFormValues = z.infer<typeof formSchema>;
@@ -29,13 +31,34 @@ interface UrlInputFormProps {
 }
 
 export default function UrlInputForm({ onSubmit, isLoading }: UrlInputFormProps) {
+  const [githubToken, setGithubToken] = useState<string>('');
+
   const form = useForm<UrlInputFormValues>({
     resolver: zodResolver(formSchema),
     defaultValues: {
       githubRepoUrl: "",
       applicationUrl: "",
+      githubToken: "",
     },
   });
+
+  useEffect(() => {
+    const storedToken = localStorage.getItem('githubApiToken');
+    if (storedToken) {
+      setGithubToken(storedToken);
+      form.setValue('githubToken', storedToken);
+    }
+  }, [form]);
+
+  const handleTokenChange = (value: string) => {
+    setGithubToken(value);
+    if (value) {
+      localStorage.setItem('githubApiToken', value);
+    } else {
+      localStorage.removeItem('githubApiToken');
+    }
+    form.setValue('githubToken', value);
+  };
 
   return (
     <Card className="w-full shadow-lg">
@@ -76,6 +99,33 @@ export default function UrlInputForm({ onSubmit, isLoading }: UrlInputFormProps)
                   <FormControl>
                     <Input placeholder="https://yourapp.com" {...field} />
                   </FormControl>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+            <FormField
+              control={form.control}
+              name="githubToken"
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel className="flex items-center">
+                    <Key className="mr-2 h-5 w-5 text-primary" />
+                    GitHub API Token (Optional)
+                  </FormLabel>
+                  <FormControl>
+                    <Input 
+                      type="password"
+                      placeholder="Enter GitHub PAT for private repos / higher rate limits"
+                      {...field}
+                      onChange={(e) => {
+                        field.onChange(e);
+                        handleTokenChange(e.target.value);
+                      }}
+                    />
+                  </FormControl>
+                  <p className="text-xs text-muted-foreground">
+                    Token is stored in your browser's local storage. Leave blank for public repositories (rate limits may apply).
+                  </p>
                   <FormMessage />
                 </FormItem>
               )}

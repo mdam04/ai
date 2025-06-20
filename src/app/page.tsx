@@ -1,230 +1,370 @@
-
 "use client";
 
 import React, { useState, useEffect } from 'react';
-import { analyzeGithubRepositoryAndGenerateTests, AnalyzeAndGenerateTestsInput, AnalyzeAndGenerateTestsOutput } from '@/ai/flows/analyze-github-repo';
-import { executePlaywrightTest, PlaywrightExecutionResult } from '@/app/actions/execute-playwright-action';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
+import { useToast } from "@/hooks/use-toast";
+import { 
+  FileText, 
+  Play, 
+  History, 
+  Plus, 
+  Trash2, 
+  Download,
+  CheckCircle,
+  XCircle,
+  Clock
+} from 'lucide-react';
+
+// Import components
 import UrlInputForm, { UrlInputFormValues } from '@/components/playwright-genius/url-input-form';
 import AnalysisResults from '@/components/playwright-genius/analysis-results';
 import TestCaseReview from '@/components/playwright-genius/test-case-review';
 import TestExecutionDisplay from '@/components/playwright-genius/test-execution-display';
-import { useToast } from "@/hooks/use-toast";
-import { Loader2, AlertTriangle, Github } from 'lucide-react';
-import { Button } from '@/components/ui/button';
-import { Separator } from '@/components/ui/separator';
-import { Input } from '@/components/ui/input';
-import { Label } from '@/components/ui/label';
 
-type AppState = 
-  | 'idle' 
-  | 'analyzingAndGenerating'
-  | 'reviewingTests' 
-  | 'executingTest'
-  | 'executingAllTests' // New state
-  | 'viewingReport';
+// Import services and types
+import { analyzeGithubRepositoryAndGenerateTests, AnalyzeAndGenerateTestsInput, AnalyzeAndGenerateTestsOutput } from '@/ai/flows/analyze-github-repo';
+import { executePlaywrightTest, PlaywrightExecutionResult } from '@/app/actions/execute-playwright-action';
+import { 
+  createTestSession, 
+  getTestSession, 
+  updateTestSessionExecution, 
+  getTestSessionSummaries,
+  deleteTestSession 
+} from '@/services/test-session-service';
+import { TestSessionSummary } from '@/models/TestSession';
 
 type AnalysisResultType = Omit<AnalyzeAndGenerateTestsOutput, 'testCases'>;
 type TestCaseType = AnalyzeAndGenerateTestsOutput['testCases'][0];
 type TestCasesOutputType = { testCases: AnalyzeAndGenerateTestsOutput['testCases'] };
 
-
 export default function HomePage() {
-  const [appState, setAppState] = useState<AppState>('idle');
-  const [error, setError] = useState<string | null>(null);
+  const [activeTab, setActiveTab] = useState('analyze');
+  const [currentSessionId, setCurrentSessionId] = useState<string | null>(null);
+  const [isAnalyzing, setIsAnalyzing] = useState(false);
+  const [isExecuting, setIsExecuting] = useState(false);
+  
+  // Analysis data
   const [analysisInput, setAnalysisInput] = useState<UrlInputFormValues | null>(null);
   const [analysisResult, setAnalysisResult] = useState<AnalysisResultType | null>(null);
   const [testCasesOutput, setTestCasesOutput] = useState<TestCasesOutputType | null>(null);
-  const [currentExecutingScenario, setCurrentExecutingScenario] = useState<TestCaseType | null>(null);
-  const [executionReport, setExecutionReport] = useState<PlaywrightExecutionResult | null>(null);
-  const [allExecutionReports, setAllExecutionReports] = useState<PlaywrightExecutionResult[]>([]);
-  const [githubToken, setGithubToken] = useState<string>('');
   const [analysisDebugInfo, setAnalysisDebugInfo] = useState<AnalyzeAndGenerateTestsOutput['debugInfo'] | null>(null);
-
+  
+  // Execution data
+  const [executionResults, setExecutionResults] = useState<PlaywrightExecutionResult[]>([]);
+  const [currentExecutingScenario, setCurrentExecutingScenario] = useState<TestCaseType | null>(null);
+  
+  // History data
+  const [sessionHistory, setSessionHistory] = useState<TestSessionSummary[]>([]);
+  const [loadingHistory, setLoadingHistory] = useState(false);
 
   const { toast } = useToast();
 
+  // Load session history on component mount
   useEffect(() => {
-    const storedToken = localStorage.getItem('githubApiToken');
-    if (storedToken) {
-      setGithubToken(storedToken);
-    }
+    loadSessionHistory();
   }, []);
 
-  const handleTokenChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const newToken = e.target.value;
-    setGithubToken(newToken);
-    if (newToken) {
-      localStorage.setItem('githubApiToken', newToken);
-    } else {
-      localStorage.removeItem('githubApiToken');
+  const loadSessionHistory = async () => {
+    setLoadingHistory(true);
+    try {
+      const summaries = await getTestSessionSummaries();
+      setSessionHistory(summaries);
+    } catch (error: any) {
+      toast({
+        variant: "destructive",
+        title: "Error",
+        description: `Failed to load session history: ${error.message}`
+      });
+    } finally {
+      setLoadingHistory(false);
     }
   };
 
-  const handleUrlSubmit = async (values: UrlInputFormValues) => {
-    setAppState('analyzingAndGenerating');
-    setError(null);
+  const handleAnalyze = async (values: UrlInputFormValues) => {
+    setIsAnalyzing(true);
     setAnalysisInput(values);
     setAnalysisResult(null);
     setTestCasesOutput(null);
-    setExecutionReport(null);
-    setCurrentExecutingScenario(null);
-    setAllExecutionReports([]);
+    setExecutionResults([]);
+    setCurrentSessionId(null);
     setAnalysisDebugInfo(null);
 
     try {
       const flowInput: AnalyzeAndGenerateTestsInput = {
         githubRepoUrl: values.githubRepoUrl,
         applicationUrl: values.applicationUrl,
-        githubToken: githubToken || undefined,
+        githubToken: values.githubToken || undefined,
       };
-      toast({ title: "Starting Analysis & Test Generation", description: "Fetching repository data and generating tests..." });
+
+      toast({ title: "Starting Analysis", description: "Analyzing repository and generating tests..." });
+      
       const result = await analyzeGithubRepositoryAndGenerateTests(flowInput);
       
       if (!result) {
-        console.error("Analysis flow did not return a result:", result);
-        const errorMessage = "AI analysis failed to return any data. This could be due to an issue with the AI model or the input provided. Please check server logs for more details and try again.";
-        setError(errorMessage);
-        toast({ variant: "destructive", title: "Analysis Error", description: errorMessage });
-        setAppState('idle');
-        return; 
+        throw new Error("Analysis failed to return any data");
       }
       
+      // Store analysis results
       setAnalysisResult({
         applicationLogicSummary: result.applicationLogicSummary,
         domStructureSummary: result.domStructureSummary,
         potentialUserFlows: result.potentialUserFlows,
-        analysisSource: result.analysisSource, 
+        analysisSource: result.analysisSource,
       });
       setTestCasesOutput({ testCases: result.testCases });
       setAnalysisDebugInfo(result.debugInfo || null);
 
-      let toastTitle = "Analysis & Test Generation Complete";
-      let toastDescription = result.debugInfo?.repoServiceMessage || 'Review the results below.';
-      
-      if (result.analysisSource.toLowerCase().includes("error") || 
-          result.analysisSource.toLowerCase().includes("no repository data") ||
-          (result.debugInfo?.repoServiceMessage && (result.debugInfo.repoServiceMessage.toLowerCase().includes("failed") || result.debugInfo.repoServiceMessage.toLowerCase().includes("error")))
-         ) {
-        toastTitle = "Analysis Issue";
-      }
-
-      toast({ 
-        title: toastTitle, 
-        description: toastDescription
+      // Save to MongoDB
+      const sessionId = await createTestSession({
+        githubRepoUrl: values.githubRepoUrl,
+        applicationUrl: values.applicationUrl,
+        githubToken: values.githubToken,
+        analysisResult: {
+          applicationLogicSummary: result.applicationLogicSummary,
+          domStructureSummary: result.domStructureSummary,
+          potentialUserFlows: result.potentialUserFlows,
+          analysisSource: result.analysisSource,
+        },
+        testCases: result.testCases,
       });
-      setAppState('reviewingTests');
+      
+      setCurrentSessionId(sessionId);
+      
+      toast({ 
+        title: "Analysis Complete", 
+        description: "Test cases generated and saved successfully!"
+      });
+      
+      // Switch to test cases tab
+      setActiveTab('test-cases');
+      
+      // Refresh history
+      loadSessionHistory();
 
-    } catch (e: any) {
-      console.error("Analysis and test generation failed:", e);
-      const errorMessage = `Analysis and test generation failed: ${e.message || 'Unknown error'}`;
-      setError(errorMessage);
-      toast({ variant: "destructive", title: "Error", description: errorMessage });
-      setAppState('idle');
+    } catch (error: any) {
+      console.error("Analysis failed:", error);
+      toast({
+        variant: "destructive",
+        title: "Analysis Failed",
+        description: error.message || 'Unknown error occurred'
+      });
+    } finally {
+      setIsAnalyzing(false);
     }
   };
 
-  const handleExecuteScenario = async (scenario: TestCaseType | null) => {
-    if (!scenario) {
-      toast({ variant: "destructive", title: "Execution Error", description: "Please select a single scenario to execute." });
-      return;
-    }
-    if (!analysisInput?.applicationUrl) {
-      toast({ variant: "destructive", title: "Execution Error", description: "Application URL is missing." });
+  const handleExecuteScenario = async (scenario: TestCaseType) => {
+    if (!analysisInput?.applicationUrl || !currentSessionId) {
+      toast({
+        variant: "destructive",
+        title: "Execution Error",
+        description: "Missing application URL or session data"
+      });
       return;
     }
 
-    setAppState('executingTest');
+    setIsExecuting(true);
     setCurrentExecutingScenario(scenario);
-    setExecutionReport(null);
-    setError(null);
     
-    toast({ title: "Executing Test", description: `Running scenario: ${scenario.scenario}`});
+    toast({ title: "Executing Test", description: `Running: ${scenario.scenario}` });
 
     try {
-      const report = await executePlaywrightTest(scenario, analysisInput.applicationUrl);
-      setExecutionReport(report);
-      if (report.success) {
-        toast({ title: "Execution Complete", description: `${scenario.scenario} passed.` });
+      const result = await executePlaywrightTest(scenario, analysisInput.applicationUrl);
+      
+      // Add execution timestamp
+      const executionResult = {
+        ...result,
+        executedAt: new Date(),
+      };
+      
+      // Update local state
+      setExecutionResults(prev => [...prev, executionResult]);
+      
+      // Save to MongoDB
+      await updateTestSessionExecution(currentSessionId, executionResult);
+      
+      if (result.success) {
+        toast({ title: "Test Passed", description: scenario.scenario });
       } else {
-        toast({ variant: "destructive", title: "Execution Failed", description: `${scenario.scenario} failed. ${report.error || ''}` });
+        toast({ 
+          variant: "destructive", 
+          title: "Test Failed", 
+          description: `${scenario.scenario}: ${result.error || 'Unknown error'}` 
+        });
       }
-      setAppState('viewingReport');
-    } catch (e: any) {
-      console.error("Test execution failed:", e);
-      const errorMessage = `Execution of '${scenario.scenario}' failed: ${e.message || 'Unknown server error'}`;
-      setError(errorMessage);
-      toast({ variant: "destructive", title: "Execution Error", description: errorMessage });
-      setAppState('reviewingTests'); 
+      
+      // Switch to results tab
+      setActiveTab('results');
+      
+      // Refresh history
+      loadSessionHistory();
+
+    } catch (error: any) {
+      console.error("Test execution failed:", error);
+      toast({
+        variant: "destructive",
+        title: "Execution Error",
+        description: error.message || 'Unknown error occurred'
+      });
+    } finally {
+      setIsExecuting(false);
+      setCurrentExecutingScenario(null);
     }
   };
 
   const handleExecuteAllScenarios = async () => {
-    if (!testCasesOutput || testCasesOutput.testCases.length === 0) {
-      toast({ variant: "destructive", title: "Execution Error", description: "No test cases available to execute." });
+    if (!testCasesOutput || !analysisInput?.applicationUrl || !currentSessionId) {
+      toast({
+        variant: "destructive",
+        title: "Execution Error",
+        description: "Missing test cases, application URL, or session data"
+      });
       return;
     }
-    if (!analysisInput?.applicationUrl) {
-      toast({ variant: "destructive", title: "Execution Error", description: "Application URL is missing." });
-      return;
-    }
 
-    setAppState('executingAllTests');
-    setError(null);
-    setAllExecutionReports([]);
-    let overallSuccess = true;
-    let failedCount = 0;
+    setIsExecuting(true);
+    let successCount = 0;
+    let failureCount = 0;
 
-    toast({ title: "Starting All Tests", description: `Executing ${testCasesOutput.testCases.length} scenarios...`});
+    toast({ 
+      title: "Starting All Tests", 
+      description: `Executing ${testCasesOutput.testCases.length} test cases...` 
+    });
 
-    for (let i = 0; i < testCasesOutput.testCases.length; i++) {
-      const scenario = testCasesOutput.testCases[i];
-      setCurrentExecutingScenario(scenario); // Visually indicate current test (optional, depends on UI)
-      toast({ title: `Executing (${i + 1}/${testCasesOutput.testCases.length})`, description: scenario.scenario });
+    for (const scenario of testCasesOutput.testCases) {
+      setCurrentExecutingScenario(scenario);
+      
       try {
-        const report = await executePlaywrightTest(scenario, analysisInput.applicationUrl);
-        setAllExecutionReports(prev => [...prev, report]);
-        if (report.success) {
-          toast({ title: "Test Passed", description: `${scenario.scenario}` });
+        const result = await executePlaywrightTest(scenario, analysisInput.applicationUrl);
+        
+        const executionResult = {
+          ...result,
+          executedAt: new Date(),
+        };
+        
+        setExecutionResults(prev => [...prev, executionResult]);
+        await updateTestSessionExecution(currentSessionId, executionResult);
+        
+        if (result.success) {
+          successCount++;
         } else {
-          overallSuccess = false;
-          failedCount++;
-          toast({ variant: "destructive", title: "Test Failed", description: `${scenario.scenario}: ${report.error || 'Unknown reason'}` });
+          failureCount++;
         }
-      } catch (e: any) {
-        overallSuccess = false;
-        failedCount++;
-        const errorMessage = `Execution of '${scenario.scenario}' failed: ${e.message || 'Unknown server error'}`;
-        setError(prevError => prevError ? `${prevError}\n${errorMessage}` : errorMessage); // Accumulate errors
-        toast({ variant: "destructive", title: `Execution Error (${scenario.scenario})`, description: errorMessage });
-        setAllExecutionReports(prev => [...prev, { scenario: scenario.scenario, success: false, logs: [errorMessage], stdout: "", stderr: "" }]);
+        
+      } catch (error: any) {
+        failureCount++;
+        const errorResult = {
+          scenario: scenario.scenario,
+          success: false,
+          logs: [error.message],
+          stdout: "",
+          stderr: "",
+          error: error.message,
+          executedAt: new Date(),
+        };
+        
+        setExecutionResults(prev => [...prev, errorResult]);
+        await updateTestSessionExecution(currentSessionId, errorResult);
       }
     }
-    
+
     setCurrentExecutingScenario(null);
-    if (overallSuccess) {
-      toast({ title: "All Tests Completed", description: "All scenarios passed successfully!" });
-    } else {
-      toast({ variant: "destructive", title: "All Tests Completed", description: `${failedCount} scenario(s) failed. Check individual toasts/logs.` });
-    }
-    setAppState('reviewingTests'); // Or a new state to view summary if implemented
+    setIsExecuting(false);
+    
+    toast({
+      title: "All Tests Complete",
+      description: `${successCount} passed, ${failureCount} failed`
+    });
+    
+    setActiveTab('results');
+    loadSessionHistory();
   };
-  
-  const handleReset = () => {
-    setAppState('idle');
-    setError(null);
+
+  const handleLoadSession = async (sessionId: string) => {
+    try {
+      const session = await getTestSession(sessionId);
+      if (!session) {
+        toast({
+          variant: "destructive",
+          title: "Error",
+          description: "Session not found"
+        });
+        return;
+      }
+
+      // Load session data
+      setCurrentSessionId(session.sessionId);
+      setAnalysisInput({
+        githubRepoUrl: session.githubRepoUrl,
+        applicationUrl: session.applicationUrl,
+        githubToken: session.githubToken || '',
+      });
+      setAnalysisResult(session.analysisResult);
+      setTestCasesOutput({ testCases: session.testCases });
+      setExecutionResults(session.executionResults);
+      
+      toast({
+        title: "Session Loaded",
+        description: `Loaded session for ${session.githubRepoUrl}`
+      });
+      
+      setActiveTab('test-cases');
+      
+    } catch (error: any) {
+      toast({
+        variant: "destructive",
+        title: "Error",
+        description: `Failed to load session: ${error.message}`
+      });
+    }
+  };
+
+  const handleDeleteSession = async (sessionId: string) => {
+    try {
+      await deleteTestSession(sessionId);
+      toast({
+        title: "Session Deleted",
+        description: "Test session has been removed"
+      });
+      loadSessionHistory();
+      
+      // Clear current session if it was deleted
+      if (currentSessionId === sessionId) {
+        setCurrentSessionId(null);
+        setAnalysisInput(null);
+        setAnalysisResult(null);
+        setTestCasesOutput(null);
+        setExecutionResults([]);
+        setActiveTab('analyze');
+      }
+    } catch (error: any) {
+      toast({
+        variant: "destructive",
+        title: "Error",
+        description: `Failed to delete session: ${error.message}`
+      });
+    }
+  };
+
+  const handleNewSession = () => {
+    setCurrentSessionId(null);
     setAnalysisInput(null);
     setAnalysisResult(null);
     setTestCasesOutput(null);
-    setCurrentExecutingScenario(null);
-    setExecutionReport(null);
-    setAllExecutionReports([]);
-    setAnalysisDebugInfo(null);
+    setExecutionResults([]);
+    setActiveTab('analyze');
   };
 
-  // CRUD handlers for scenarios and steps
+  // CRUD handlers for test cases (same as before)
   const handleAddScenario = () => {
     setTestCasesOutput(prev => {
-      const newScenario: TestCaseType = { scenario: "New Scenario", steps: ["await page.goto('/'); // New step for new scenario"] };
+      const newScenario: TestCaseType = { 
+        scenario: "New Scenario", 
+        steps: ["await page.goto('/'); // New step for new scenario"] 
+      };
       return { testCases: [...(prev?.testCases || []), newScenario] };
     });
   };
@@ -287,106 +427,211 @@ export default function HomePage() {
     });
   };
 
-
-  const isLoading = appState === 'analyzingAndGenerating';
-  const isExecuting = appState === 'executingTest';
-  const isExecutingAll = appState === 'executingAllTests';
-
-
   return (
-    <div className="container mx-auto p-4 sm:p-6 lg:p-8 flex flex-col items-center space-y-8">
-      
-      {(appState === 'idle' || appState === 'analyzingAndGenerating') && (
-        <>
-          <UrlInputForm onSubmit={handleUrlSubmit} isLoading={isLoading} />
-          <div className="w-full max-w-xl space-y-2 mt-4 p-4 border rounded-md shadow-sm bg-card">
-            <Label htmlFor="githubToken" className="flex items-center text-sm font-medium text-muted-foreground">
-              <Github className="mr-2 h-4 w-4" />
-              GitHub API Token (Optional)
-            </Label>
-            <Input
-              id="githubToken"
-              type="password"
-              value={githubToken}
-              onChange={handleTokenChange}
-              placeholder="Enter GitHub PAT for private repos / higher rate limits"
-              className="text-sm"
-            />
-            <p className="text-xs text-muted-foreground">
-              Token is stored in your browser's local storage. Leave blank for public repositories (rate limits may apply).
-            </p>
-          </div>
-        </>
-      )}
-
-      {error && (
-        <div className="w-full max-w-2xl p-4 bg-destructive/10 border border-destructive text-destructive rounded-md flex items-center">
-          <AlertTriangle className="h-5 w-5 mr-2" />
-          <p className="whitespace-pre-wrap">{error}</p>
-        </div>
-      )}
-      
-      {appState === 'analyzingAndGenerating' && (
-         <div className="flex flex-col items-center justify-center text-muted-foreground p-10">
-          <Loader2 className="h-12 w-12 animate-spin text-primary mb-4" />
-          <p className="font-headline text-lg">Fetching Repository & Generating Tests...</p>
-          <p>This may take a moment, especially for larger repositories.</p>
-        </div>
-      )}
-      
-      {analysisResult && (appState !== 'idle' && appState !== 'analyzingAndGenerating') && (
-        <>
-          <AnalysisResults results={analysisResult} debugInfo={analysisDebugInfo} />
-          <Separator className="my-8" />
-        </>
-      )}
-
-      {testCasesOutput && (appState === 'reviewingTests' || appState === 'executingTest' || appState === 'executingAllTests' || appState === 'viewingReport') && (
-        <TestCaseReview 
-          testCasesOutput={testCasesOutput} 
-          onExecuteTests={handleExecuteScenario}
-          isExecuting={isExecuting}
-          onAddScenario={handleAddScenario}
-          onEditScenarioName={handleEditScenarioName}
-          onDeleteScenario={handleDeleteScenario}
-          onAddStep={handleAddStep}
-          onEditStep={handleEditStep}
-          onDeleteStep={handleDeleteStep}
-          onExecuteAllTests={handleExecuteAllScenarios}
-          isExecutingAll={isExecutingAll}
-        />
-      )}
-      
-      {isExecuting && currentExecutingScenario && (
-         <div className="flex flex-col items-center justify-center text-muted-foreground p-10">
-          <Loader2 className="h-12 w-12 animate-spin text-primary mb-4" />
-          <p className="font-headline text-lg">Executing: {currentExecutingScenario.scenario}</p>
-          <p>Running Playwright test on the server...</p>
-        </div>
-      )}
-
-      {isExecutingAll && (
-         <div className="flex flex-col items-center justify-center text-muted-foreground p-10">
-          <Loader2 className="h-12 w-12 animate-spin text-primary mb-4" />
-          <p className="font-headline text-lg">Executing All Test Cases...</p>
-          {currentExecutingScenario && <p className="text-sm">Currently running: {currentExecutingScenario.scenario}</p>}
-          <p>Please wait, this may take some time.</p>
-        </div>
-      )}
-      
-      {appState === 'viewingReport' && executionReport && (
-         <TestExecutionDisplay 
-            report={executionReport}
-            onBackToReview={() => setAppState('reviewingTests')}
-          />
-      )}
-
-      {(appState !== 'idle' && appState !== 'analyzingAndGenerating' && !isExecutingAll) && (
-        <Button variant="outline" onClick={handleReset} className="mt-8">
-          Start New Analysis
+    <div className="container mx-auto p-4 sm:p-6 lg:p-8">
+      <div className="flex justify-between items-center mb-6">
+        <h1 className="text-3xl font-bold">Playwright Genius</h1>
+        <Button onClick={handleNewSession} variant="outline">
+          <Plus className="mr-2 h-4 w-4" />
+          New Session
         </Button>
-      )}
+      </div>
+
+      <Tabs value={activeTab} onValueChange={setActiveTab} className="w-full">
+        <TabsList className="grid w-full grid-cols-4">
+          <TabsTrigger value="analyze" className="flex items-center gap-2">
+            <FileText className="h-4 w-4" />
+            Analyze
+          </TabsTrigger>
+          <TabsTrigger value="test-cases" className="flex items-center gap-2">
+            <Play className="h-4 w-4" />
+            Test Cases
+          </TabsTrigger>
+          <TabsTrigger value="results" className="flex items-center gap-2">
+            <CheckCircle className="h-4 w-4" />
+            Results
+          </TabsTrigger>
+          <TabsTrigger value="history" className="flex items-center gap-2">
+            <History className="h-4 w-4" />
+            History
+          </TabsTrigger>
+        </TabsList>
+
+        <TabsContent value="analyze" className="space-y-6">
+          <UrlInputForm onSubmit={handleAnalyze} isLoading={isAnalyzing} />
+          
+          {analysisResult && (
+            <AnalysisResults results={analysisResult} debugInfo={analysisDebugInfo} />
+          )}
+        </TabsContent>
+
+        <TabsContent value="test-cases" className="space-y-6">
+          {testCasesOutput ? (
+            <TestCaseReview 
+              testCasesOutput={testCasesOutput}
+              onExecuteTests={handleExecuteScenario}
+              isExecuting={isExecuting}
+              onAddScenario={handleAddScenario}
+              onEditScenarioName={handleEditScenarioName}
+              onDeleteScenario={handleDeleteScenario}
+              onAddStep={handleAddStep}
+              onEditStep={handleEditStep}
+              onDeleteStep={handleDeleteStep}
+              onExecuteAllTests={handleExecuteAllScenarios}
+              isExecutingAll={isExecuting}
+            />
+          ) : (
+            <Card>
+              <CardHeader>
+                <CardTitle>No Test Cases Available</CardTitle>
+                <CardDescription>
+                  Please run an analysis first to generate test cases.
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                <Button onClick={() => setActiveTab('analyze')}>
+                  Go to Analysis
+                </Button>
+              </CardContent>
+            </Card>
+          )}
+        </TabsContent>
+
+        <TabsContent value="results" className="space-y-6">
+          {executionResults.length > 0 ? (
+            <div className="space-y-4">
+              <Card>
+                <CardHeader>
+                  <CardTitle>Test Execution Summary</CardTitle>
+                  <CardDescription>
+                    Results from test executions
+                  </CardDescription>
+                </CardHeader>
+                <CardContent>
+                  <div className="grid grid-cols-3 gap-4 mb-4">
+                    <div className="text-center">
+                      <div className="text-2xl font-bold text-green-600">
+                        {executionResults.filter(r => r.success).length}
+                      </div>
+                      <div className="text-sm text-muted-foreground">Passed</div>
+                    </div>
+                    <div className="text-center">
+                      <div className="text-2xl font-bold text-red-600">
+                        {executionResults.filter(r => !r.success).length}
+                      </div>
+                      <div className="text-sm text-muted-foreground">Failed</div>
+                    </div>
+                    <div className="text-center">
+                      <div className="text-2xl font-bold">
+                        {executionResults.length}
+                      </div>
+                      <div className="text-sm text-muted-foreground">Total</div>
+                    </div>
+                  </div>
+                </CardContent>
+              </Card>
+
+              {executionResults.map((result, index) => (
+                <TestExecutionDisplay 
+                  key={index}
+                  report={result}
+                  onBackToReview={() => setActiveTab('test-cases')}
+                />
+              ))}
+            </div>
+          ) : (
+            <Card>
+              <CardHeader>
+                <CardTitle>No Test Results</CardTitle>
+                <CardDescription>
+                  Execute some test cases to see results here.
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                <Button onClick={() => setActiveTab('test-cases')}>
+                  Go to Test Cases
+                </Button>
+              </CardContent>
+            </Card>
+          )}
+        </TabsContent>
+
+        <TabsContent value="history" className="space-y-6">
+          <Card>
+            <CardHeader>
+              <CardTitle>Test Session History</CardTitle>
+              <CardDescription>
+                Previous analysis and test execution sessions
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              {loadingHistory ? (
+                <div className="text-center py-8">Loading history...</div>
+              ) : sessionHistory.length > 0 ? (
+                <div className="space-y-4">
+                  {sessionHistory.map((session) => (
+                    <Card key={session.sessionId} className="p-4">
+                      <div className="flex justify-between items-start">
+                        <div className="flex-1">
+                          <h3 className="font-semibold truncate">
+                            {session.githubRepoUrl}
+                          </h3>
+                          <p className="text-sm text-muted-foreground truncate">
+                            {session.applicationUrl}
+                          </p>
+                          <div className="flex items-center gap-4 mt-2">
+                            <Badge variant="outline">
+                              {session.totalTestCases} test cases
+                            </Badge>
+                            <Badge variant="outline" className="text-green-600">
+                              <CheckCircle className="h-3 w-3 mr-1" />
+                              {session.passedTests} passed
+                            </Badge>
+                            <Badge variant="outline" className="text-red-600">
+                              <XCircle className="h-3 w-3 mr-1" />
+                              {session.failedTests} failed
+                            </Badge>
+                          </div>
+                          <p className="text-xs text-muted-foreground mt-2">
+                            <Clock className="h-3 w-3 inline mr-1" />
+                            {new Date(session.createdAt).toLocaleString()}
+                          </p>
+                        </div>
+                        <div className="flex gap-2 ml-4">
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            onClick={() => handleLoadSession(session.sessionId)}
+                          >
+                            Load
+                          </Button>
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            onClick={() => handleDeleteSession(session.sessionId)}
+                          >
+                            <Trash2 className="h-4 w-4" />
+                          </Button>
+                        </div>
+                      </div>
+                    </Card>
+                  ))}
+                </div>
+              ) : (
+                <div className="text-center py-8">
+                  <p className="text-muted-foreground">No test sessions found</p>
+                  <Button 
+                    className="mt-4" 
+                    onClick={() => setActiveTab('analyze')}
+                  >
+                    Create Your First Session
+                  </Button>
+                </div>
+              )}
+            </CardContent>
+          </Card>
+        </TabsContent>
+      </Tabs>
     </div>
   );
 }
-
